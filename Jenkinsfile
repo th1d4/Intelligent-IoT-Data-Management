@@ -2,7 +2,8 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = "th1d4/iot-data-mgmt"
+        DOCKER_IMAGE_BACKEND = "th1d4/iot-data-mgmt-backend"
+        DOCKER_IMAGE_FRONTEND = "th1d4/iot-data-mgmt-frontend"
         SONAR_PROJECT = "intelligent-iot"
         STAGING_PORT = "5001"
         PROD_PORT = "5002"
@@ -17,14 +18,19 @@ pipeline {
                     python3 -m venv venv
                     . venv/bin/activate
                     pip install --upgrade pip
-                    pip install -r requirements.txt 2>/dev/null || echo "No requirements.txt"
+                    pip install -r requirements.txt
                     
                     # Install npm dependencies
                     cd new-frontend/frontend
-                    npm install 2>/dev/null || echo "No npm dependencies"
+                    npm install
                     cd ../..
+                    
+                    # Build Backend Docker image
+                    docker build -t ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER} -f Docker/Backend-Dockerfile .
+                    
+                    # Build Frontend Docker image
+                    docker build -t ${DOCKER_IMAGE_FRONTEND}:${BUILD_NUMBER} -f Docker/Frontend-Dockerfile .
                 '''
-                sh 'docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} .'
             }
         }
 
@@ -67,7 +73,7 @@ pipeline {
                 sh '''
                     . venv/bin/activate
                     bandit -r . -f json -o bandit-report.json || true
-                    trivy image --severity HIGH,CRITICAL --format json --output trivy-report.json ${DOCKER_IMAGE}:${BUILD_NUMBER} || true
+                    trivy image --severity HIGH,CRITICAL --format json --output trivy-report.json ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER} || true
                 '''
             }
             post {
@@ -81,9 +87,13 @@ pipeline {
             steps {
                 echo '=== DEPLOY STAGE: Staging ==='
                 sh '''
-                    docker stop iot-staging || true
-                    docker rm iot-staging || true
-                    docker run -d --name iot-staging -p ${STAGING_PORT}:5000 -e ENVIRONMENT=staging ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                    docker stop iot-staging-backend || true
+                    docker rm iot-staging-backend || true
+                    docker run -d --name iot-staging-backend -p ${STAGING_PORT}:5000 -e ENVIRONMENT=staging ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER}
+                    
+                    docker stop iot-staging-frontend || true
+                    docker rm iot-staging-frontend || true
+                    docker run -d --name iot-staging-frontend -p 3000:3000 -e ENVIRONMENT=staging ${DOCKER_IMAGE_FRONTEND}:${BUILD_NUMBER}
                 '''
             }
         }
@@ -98,15 +108,24 @@ pipeline {
                 )]) {
                     sh '''
                         echo ${DOCKER_PASS} | docker login -u ${DOCKER_USER} --password-stdin
-                        docker tag ${DOCKER_IMAGE}:${BUILD_NUMBER} ${DOCKER_IMAGE}:latest
-                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                        docker push ${DOCKER_IMAGE}:latest
+                        
+                        docker tag ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER} ${DOCKER_IMAGE_BACKEND}:latest
+                        docker push ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER}
+                        docker push ${DOCKER_IMAGE_BACKEND}:latest
+                        
+                        docker tag ${DOCKER_IMAGE_FRONTEND}:${BUILD_NUMBER} ${DOCKER_IMAGE_FRONTEND}:latest
+                        docker push ${DOCKER_IMAGE_FRONTEND}:${BUILD_NUMBER}
+                        docker push ${DOCKER_IMAGE_FRONTEND}:latest
                     '''
                 }
                 sh '''
-                    docker stop iot-production || true
-                    docker rm iot-production || true
-                    docker run -d --name iot-production -p ${PROD_PORT}:5000 -e ENVIRONMENT=production ${DOCKER_IMAGE}:latest
+                    docker stop iot-production-backend || true
+                    docker rm iot-production-backend || true
+                    docker run -d --name iot-production-backend -p ${PROD_PORT}:5000 -e ENVIRONMENT=production ${DOCKER_IMAGE_BACKEND}:latest
+                    
+                    docker stop iot-production-frontend || true
+                    docker rm iot-production-frontend || true
+                    docker run -d --name iot-production-frontend -p 3001:3000 -e ENVIRONMENT=production ${DOCKER_IMAGE_FRONTEND}:latest
                 '''
             }
         }
