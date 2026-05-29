@@ -8,23 +8,27 @@ pipeline {
         PROD_PORT = "5002"
     }
 
-    stages {
-
-        // ─── STAGE 1: BUILD ───────────────────────────────────────────
-        stage('Build') {
-            steps {
-                echo '=== BUILD STAGE: Installing dependencies and building Docker image ==='
-                sh '''
-                    cd newBackend
-                    pip3 install -r ../requirements.txt || true
-                    cd ../new-frontend/frontend
-                    npm ci || true
-                    cd ../..
-                '''
-                sh 'docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} -f Docker/Dockerfile . || docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} .'
-                echo 'Build artefact: Docker image ${DOCKER_IMAGE}:${BUILD_NUMBER}'
-            }
+    stage('Build') {
+        steps {
+            echo '=== BUILD STAGE: Installing dependencies and building Docker image ==='
+            sh '''
+                # Create virtual environment
+                python3 -m venv venv
+                . venv/bin/activate
+                
+                # Install Python dependencies
+                pip install --upgrade pip
+                pip install -r requirements.txt
+                
+                # Install npm dependencies
+                cd new-frontend/frontend
+                npm install
+                cd ../..
+            '''
+            sh 'docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} .'
+            echo 'Build artefact: Docker image ${DOCKER_IMAGE}:${BUILD_NUMBER}'
         }
+    }
 
         // ─── STAGE 2: TEST ────────────────────────────────────────────
         stage('Test') {
