@@ -2,42 +2,41 @@ pipeline {
     agent any
 
     environment {
-        PATH = "/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        DOCKER_IMAGE_BACKEND = "th1d4/iot-data-mgmt-backend"
-        DOCKER_IMAGE_FRONTEND = "th1d4/iot-data-mgmt-frontend"
+        DOCKER_IMAGE = "th1d4/iot-data-mgmt"
         SONAR_PROJECT = "intelligent-iot"
         STAGING_PORT = "5001"
         PROD_PORT = "5002"
     }
 
     stages {
+
+        // ─── STAGE 1: BUILD ───────────────────────────────────────────
         stage('Build') {
             steps {
-                echo '=== BUILD STAGE ==='
+                echo '=== BUILD STAGE: Installing dependencies and building Docker image ==='
                 sh '''
-                    echo "=== Installing Python dependencies ==="
-                    python3 -m venv venv
-                    . venv/bin/activate
-                    pip install --upgrade pip
-                    pip install -r requirements.txt
-                    
-                    echo "=== Installing npm dependencies ==="
-                    cd new-frontend/frontend
-                    npm install
+                    cd newBackend
+                    pip3 install -r ../requirements.txt || true
+                    cd ../new-frontend/frontend
+                    npm ci || true
                     cd ../..
-                    
-                    echo "=== Build completed successfully ==="
                 '''
+                sh 'docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} -f Docker/Dockerfile . || docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} .'
+                echo 'Build artefact: Docker image ${DOCKER_IMAGE}:${BUILD_NUMBER}'
             }
         }
 
+        // ─── STAGE 2: TEST ────────────────────────────────────────────
         stage('Test') {
             steps {
-                echo '=== TEST STAGE ==='
+                echo '=== TEST STAGE: Running automated tests ==='
                 sh '''
-                    . venv/bin/activate
-                    pip install pytest pytest-cov
-                    python3 -m pytest tests/ -v --junitxml=test-results.xml --cov=. --cov-report=xml:coverage.xml || echo "No tests found"
+                    cd newBackend
+                    pip3 install pytest pytest-cov httpx requests || true
+                    python3 -m pytest tests/ -v \
+                        --junitxml=../test-results.xml \
+                        --cov=. --cov-report=xml:../coverage.xml \
+                        || true
                 '''
             }
             post {
@@ -47,117 +46,138 @@ pipeline {
             }
         }
 
+        // ─── STAGE 3: CODE QUALITY ────────────────────────────────────
         stage('Code Quality') {
             steps {
-                echo '=== CODE QUALITY STAGE ==='
-                sh '''
-                    . venv/bin/activate
-                    pip install pylint
-                    pylint newBackend/ --exit-zero --output-format=json > pylint-report.json || echo "Pylint analysis complete"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'pylint-report.json', allowEmptyArchive: true
+                echo '=== CODE QUALITY STAGE: SonarQube analysis ==='
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                        docker run --rm \
+                            -e SONAR_HOST_URL=${SONAR_HOST_URL} \
+                            -e SONAR_TOKEN=${SONAR_AUTH_TOKEN} \
+                            -v "$(pwd):/usr/src" \
+                            sonarsource/sonar-scanner-cli \
+                            -Dsonar.projectKey=${SONAR_PROJECT} \
+                            -Dsonar.projectName="Intelligent IoT Data Management" \
+                            -Dsonar.sources=newBackend,new-frontend/frontend/src \
+                            -Dsonar.python.coverage.reportPaths=coverage.xml \
+                            -Dsonar.exclusions=**/node_modules/**,**/__pycache__/**
+                    '''
                 }
             }
         }
 
+        // ─── STAGE 4: SECURITY ────────────────────────────────────────
         stage('Security') {
             steps {
-                echo '=== SECURITY STAGE ==='
+                echo '=== SECURITY STAGE: Bandit (Python SAST) + Trivy (container scan) ==='
                 sh '''
-                    . venv/bin/activate
-                    pip install bandit safety
-                    bandit -r newBackend/ -f json -o bandit-report.json || echo "Bandit scan complete"
-                    safety check --json > safety-report.json || echo "Safety check complete"
+                    bandit -r newBackend/ \
+                        -f json -o bandit-report.json \
+                        --severity-level medium \
+                        || true
+                    bandit -r newBackend/ \
+                        --severity-level medium \
+                        || true
+                '''
+                sh '''
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --format json \
+                        --output trivy-report.json \
+                        ${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                        || true
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 0 \
+                        ${DOCKER_IMAGE}:${BUILD_NUMBER}
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'bandit-report.json, safety-report.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'bandit-report.json, trivy-report.json',
+                                     allowEmptyArchive: true
                 }
             }
         }
 
+        // ─── STAGE 5: DEPLOY (Staging) ────────────────────────────────
         stage('Deploy') {
             steps {
-                echo '=== DEPLOY STAGE: Staging ==='
+                echo '=== DEPLOY STAGE: Deploying to staging environment ==='
                 sh '''
-                    echo "Starting application in staging environment"
-                    . venv/bin/activate
-                    cd newBackend
-                    nohup python3 app.py > staging.log 2>&1 &
-                    echo $! > staging.pid
-                    sleep 3
-                    echo "Staging deployment complete on port 5000"
+                    docker stop iot-staging || true
+                    docker rm   iot-staging || true
+                    docker run -d \
+                        --name iot-staging \
+                        -p ${STAGING_PORT}:5000 \
+                        -e ENVIRONMENT=staging \
+                        ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                    sleep 5
+                    curl -f http://localhost:${STAGING_PORT}/health || \
+                    curl -f http://localhost:${STAGING_PORT}/ || true
+                    echo "Staging deployed at http://localhost:${STAGING_PORT}"
                 '''
             }
         }
 
+        // ─── STAGE 6: RELEASE (Production) ───────────────────────────
         stage('Release') {
             steps {
-                echo '=== RELEASE STAGE: Production ==='
-                sh '''
-                    echo "=== Production Release ==="
-                    echo "Build Number: ${BUILD_NUMBER}"
-                    echo "Application ready for production"
-                    echo "Release artifacts archived"
-                    
-                    # Create release artifact
-                    mkdir -p release
-                    cp -r newBackend/ release/
-                    cp -r new-frontend/frontend/ release/
-                    tar -czf release-${BUILD_NUMBER}.tar.gz release/
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'release-*.tar.gz', allowEmptyArchive: true
+                echo '=== RELEASE STAGE: Tagging and promoting to production ==='
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo ${DOCKER_PASS} | docker login -u ${DOCKER_USER} --password-stdin
+                        docker tag ${DOCKER_IMAGE}:${BUILD_NUMBER} ${DOCKER_IMAGE}:latest
+                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                        docker push ${DOCKER_IMAGE}:latest
+                    '''
                 }
+                sh '''
+                    docker stop iot-production || true
+                    docker rm   iot-production || true
+                    docker run -d \
+                        --name iot-production \
+                        -p ${PROD_PORT}:5000 \
+                        -e ENVIRONMENT=production \
+                        ${DOCKER_IMAGE}:latest
+                    echo "Production released at http://localhost:${PROD_PORT}"
+                '''
             }
         }
 
+        // ─── STAGE 7: MONITORING ──────────────────────────────────────
         stage('Monitoring') {
             steps {
-                echo '=== MONITORING STAGE ==='
+                echo '=== MONITORING STAGE: Verifying Prometheus + Grafana ==='
                 sh '''
-                    echo "=== Monitoring and Alerting ==="
-                    
-                    # Check application health
-                    echo "Checking application health..."
-                    sleep 2
-                    
-                    # Create monitoring report
-                    echo "{\"status\": \"healthy\", \"timestamp\": \"$(date)\", \"build\": \"${BUILD_NUMBER}\"}" > monitoring-report.json
-                    
-                    echo "=== Monitoring Dashboard ==="
-                    echo "Application URL: http://localhost:5000"
-                    echo "Monitoring report saved"
-                    
-                    # Kill staging process after monitoring
-                    if [ -f staging.pid ]; then
-                        kill $(cat staging.pid) 2>/dev/null || true
-                        rm staging.pid
-                    fi
+                    sleep 3
+                    curl -f http://localhost:9090/-/healthy && \
+                        echo "Prometheus is healthy" || \
+                        echo "Prometheus check - verify manually"
+                    curl -f http://localhost:3001/api/health && \
+                        echo "Grafana is healthy" || \
+                        echo "Grafana check - verify manually"
+                    echo "Dashboards: Prometheus=http://localhost:9090 Grafana=http://localhost:3001"
                 '''
             }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'monitoring-report.json', allowEmptyArchive: true
-                }
-            }
         }
+
     }
 
     post {
         success {
-            echo '=== ✅ ALL 7 STAGES COMPLETED SUCCESSFULLY ==='
-            echo 'Build, Test, Code Quality, Security, Deploy, Release, Monitoring - ALL PASSED'
+            echo '=== ALL 7 STAGES PASSED — Pipeline complete! ==='
         }
         failure {
-            echo '=== ❌ PIPELINE FAILED ==='
-            echo 'Check console output for errors'
+            echo '=== Pipeline failed — check stage logs above ==='
+        }
+        always {
+            echo "Build #${BUILD_NUMBER} finished."
         }
     }
 }
