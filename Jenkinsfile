@@ -20,15 +20,14 @@ pipeline {
                     pip install --upgrade pip
                     pip install -r requirements.txt
                     
-                    # Install npm dependencies
+                    # Use system npm
+                    export PATH="/usr/local/bin:$PATH"
                     cd new-frontend/frontend
                     npm install
                     cd ../..
                     
-                    # Build Backend Docker image
+                    # Build Docker images
                     docker build -t ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER} -f Docker/Backend-Dockerfile .
-                    
-                    # Build Frontend Docker image
                     docker build -t ${DOCKER_IMAGE_FRONTEND}:${BUILD_NUMBER} -f Docker/Frontend-Dockerfile .
                 '''
             }
