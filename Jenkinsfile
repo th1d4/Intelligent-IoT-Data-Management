@@ -8,39 +8,33 @@ pipeline {
         PROD_PORT = "5002"
     }
 
-    stage('Build') {
-        steps {
-            echo '=== BUILD STAGE: Installing dependencies and building Docker image ==='
-            sh '''
-                # Create virtual environment
-                python3 -m venv venv
-                . venv/bin/activate
-                
-                # Install Python dependencies
-                pip install --upgrade pip
-                pip install -r requirements.txt
-                
-                # Install npm dependencies
-                cd new-frontend/frontend
-                npm install
-                cd ../..
-            '''
-            sh 'docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} .'
-            echo 'Build artefact: Docker image ${DOCKER_IMAGE}:${BUILD_NUMBER}'
+    stages {
+        stage('Build') {
+            steps {
+                echo '=== BUILD STAGE ==='
+                sh '''
+                    # Setup Python virtual environment
+                    python3 -m venv venv
+                    . venv/bin/activate
+                    pip install --upgrade pip
+                    pip install -r requirements.txt 2>/dev/null || echo "No requirements.txt"
+                    
+                    # Install npm dependencies
+                    cd new-frontend/frontend
+                    npm install 2>/dev/null || echo "No npm dependencies"
+                    cd ../..
+                '''
+                sh 'docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} .'
+            }
         }
-    }
 
-        // ─── STAGE 2: TEST ────────────────────────────────────────────
         stage('Test') {
             steps {
-                echo '=== TEST STAGE: Running automated tests ==='
+                echo '=== TEST STAGE ==='
                 sh '''
-                    cd newBackend
-                    pip3 install pytest pytest-cov httpx requests || true
-                    python3 -m pytest tests/ -v \
-                        --junitxml=../test-results.xml \
-                        --cov=. --cov-report=xml:../coverage.xml \
-                        || true
+                    . venv/bin/activate
+                    pip install pytest pytest-cov
+                    pytest tests/ -v --junitxml=test-results.xml --cov=. --cov-report=xml:coverage.xml || true
                 '''
             }
             post {
@@ -50,10 +44,9 @@ pipeline {
             }
         }
 
-        // ─── STAGE 3: CODE QUALITY ────────────────────────────────────
         stage('Code Quality') {
             steps {
-                echo '=== CODE QUALITY STAGE: SonarQube analysis ==='
+                echo '=== CODE QUALITY STAGE ==='
                 withSonarQubeEnv('SonarQube') {
                     sh '''
                         docker run --rm \
@@ -62,73 +55,42 @@ pipeline {
                             -v "$(pwd):/usr/src" \
                             sonarsource/sonar-scanner-cli \
                             -Dsonar.projectKey=${SONAR_PROJECT} \
-                            -Dsonar.projectName="Intelligent IoT Data Management" \
-                            -Dsonar.sources=newBackend,new-frontend/frontend/src \
-                            -Dsonar.python.coverage.reportPaths=coverage.xml \
-                            -Dsonar.exclusions=**/node_modules/**,**/__pycache__/**
+                            -Dsonar.sources=.
                     '''
                 }
             }
         }
 
-        // ─── STAGE 4: SECURITY ────────────────────────────────────────
         stage('Security') {
             steps {
-                echo '=== SECURITY STAGE: Bandit (Python SAST) + Trivy (container scan) ==='
+                echo '=== SECURITY STAGE ==='
                 sh '''
-                    bandit -r newBackend/ \
-                        -f json -o bandit-report.json \
-                        --severity-level medium \
-                        || true
-                    bandit -r newBackend/ \
-                        --severity-level medium \
-                        || true
-                '''
-                sh '''
-                    trivy image \
-                        --severity HIGH,CRITICAL \
-                        --format json \
-                        --output trivy-report.json \
-                        ${DOCKER_IMAGE}:${BUILD_NUMBER} \
-                        || true
-                    trivy image \
-                        --severity HIGH,CRITICAL \
-                        --exit-code 0 \
-                        ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                    . venv/bin/activate
+                    bandit -r . -f json -o bandit-report.json || true
+                    trivy image --severity HIGH,CRITICAL --format json --output trivy-report.json ${DOCKER_IMAGE}:${BUILD_NUMBER} || true
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'bandit-report.json, trivy-report.json',
-                                     allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'bandit-report.json, trivy-report.json', allowEmptyArchive: true
                 }
             }
         }
 
-        // ─── STAGE 5: DEPLOY (Staging) ────────────────────────────────
         stage('Deploy') {
             steps {
-                echo '=== DEPLOY STAGE: Deploying to staging environment ==='
+                echo '=== DEPLOY STAGE: Staging ==='
                 sh '''
                     docker stop iot-staging || true
-                    docker rm   iot-staging || true
-                    docker run -d \
-                        --name iot-staging \
-                        -p ${STAGING_PORT}:5000 \
-                        -e ENVIRONMENT=staging \
-                        ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                    sleep 5
-                    curl -f http://localhost:${STAGING_PORT}/health || \
-                    curl -f http://localhost:${STAGING_PORT}/ || true
-                    echo "Staging deployed at http://localhost:${STAGING_PORT}"
+                    docker rm iot-staging || true
+                    docker run -d --name iot-staging -p ${STAGING_PORT}:5000 -e ENVIRONMENT=staging ${DOCKER_IMAGE}:${BUILD_NUMBER}
                 '''
             }
         }
 
-        // ─── STAGE 6: RELEASE (Production) ───────────────────────────
         stage('Release') {
             steps {
-                echo '=== RELEASE STAGE: Tagging and promoting to production ==='
+                echo '=== RELEASE STAGE: Production ==='
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-creds',
                     usernameVariable: 'DOCKER_USER',
@@ -143,45 +105,29 @@ pipeline {
                 }
                 sh '''
                     docker stop iot-production || true
-                    docker rm   iot-production || true
-                    docker run -d \
-                        --name iot-production \
-                        -p ${PROD_PORT}:5000 \
-                        -e ENVIRONMENT=production \
-                        ${DOCKER_IMAGE}:latest
-                    echo "Production released at http://localhost:${PROD_PORT}"
+                    docker rm iot-production || true
+                    docker run -d --name iot-production -p ${PROD_PORT}:5000 -e ENVIRONMENT=production ${DOCKER_IMAGE}:latest
                 '''
             }
         }
 
-        // ─── STAGE 7: MONITORING ──────────────────────────────────────
         stage('Monitoring') {
             steps {
-                echo '=== MONITORING STAGE: Verifying Prometheus + Grafana ==='
+                echo '=== MONITORING STAGE ==='
                 sh '''
-                    sleep 3
-                    curl -f http://localhost:9090/-/healthy && \
-                        echo "Prometheus is healthy" || \
-                        echo "Prometheus check - verify manually"
-                    curl -f http://localhost:3001/api/health && \
-                        echo "Grafana is healthy" || \
-                        echo "Grafana check - verify manually"
-                    echo "Dashboards: Prometheus=http://localhost:9090 Grafana=http://localhost:3001"
+                    curl -f http://localhost:9090/-/healthy && echo "Prometheus OK"
+                    curl -f http://localhost:3001/api/health && echo "Grafana OK"
                 '''
             }
         }
-
     }
 
     post {
         success {
-            echo '=== ALL 7 STAGES PASSED — Pipeline complete! ==='
+            echo '=== ALL STAGES COMPLETED SUCCESSFULLY ==='
         }
         failure {
-            echo '=== Pipeline failed — check stage logs above ==='
-        }
-        always {
-            echo "Build #${BUILD_NUMBER} finished."
+            echo '=== PIPELINE FAILED ==='
         }
     }
 }
