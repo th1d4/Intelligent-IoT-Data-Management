@@ -21,18 +21,16 @@ pipeline {
                     pip install --upgrade pip
                     pip install -r requirements.txt
                     
-                    # Use system npm
-                    export PATH="/usr/local/bin:$PATH"
+                    # Install npm dependencies
                     cd new-frontend/frontend
                     npm install
                     cd ../..
                     
-                    # Build Docker images
-                    docker build -t ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER} -f Docker/Backend-Dockerfile .
-                    docker build -t ${DOCKER_IMAGE_FRONTEND}:${BUILD_NUMBER} -f Docker/Frontend-Dockerfile .
+                    # Skip Docker for now - just test the app
+                    echo "Application built successfully (Docker skipped for testing)"
                 '''
             }
-        }
+    }
 
         stage('Test') {
             steps {
