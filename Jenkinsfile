@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = "yourdockerhubusername/iot-data-mgmt"
+        DOCKER_IMAGE = "th1d4/iot-data-mgmt"
         SONAR_PROJECT = "intelligent-iot"
         STAGING_PORT = "5001"
         PROD_PORT = "5002"
