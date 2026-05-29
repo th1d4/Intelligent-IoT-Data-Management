@@ -2,6 +2,7 @@ pipeline {
     agent any
 
     environment {
+        PATH = "/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         DOCKER_IMAGE_BACKEND = "th1d4/iot-data-mgmt-backend"
         DOCKER_IMAGE_FRONTEND = "th1d4/iot-data-mgmt-frontend"
         SONAR_PROJECT = "intelligent-iot"
